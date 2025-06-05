@@ -1,6 +1,6 @@
 # ADU Scraper
 
-A Python project for scraping ADU (Accessory Dwelling Unit) data.
+Identify ADU permit applications with the LA Department of City Planning
 
 ## Setup
 
