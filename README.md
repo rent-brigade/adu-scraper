@@ -15,15 +15,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Project Structure
-
-- `src/`: Main source code
-- `tests/`: Unit tests
-- `pdfs/`: PDF files directory
-
-## Development
-
-To run tests:
+3. Run App
 ```bash
-pytest
-``` 
+python src/main.py
+```
