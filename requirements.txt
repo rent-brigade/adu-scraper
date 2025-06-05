@@ -1,0 +1,6 @@
+pytest==7.4.3
+python-dotenv==1.0.0
+requests
+pdfplumber
+beautifulsoup4==4.12.2
+pandas
