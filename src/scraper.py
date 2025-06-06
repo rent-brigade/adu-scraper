@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import pandas as pd
 from pdf_processor import PDFProcessor
+from typing import Optional
 
 # Set up logging
 logging.basicConfig(
@@ -24,10 +25,10 @@ class LACityPlanningScraper:
         self.api_base_url = f"{base_url}/dcpapi/general/biweeklycase"
         self.pdf_processor = PDFProcessor()
         
-    def get_pdf_links(self, year):
-        """Query the API for available PDF documents for a specific year."""
+    def get_pdf_links(self):
+        """Query the API for all available PDF documents."""
         try:
-            url = f"{self.api_base_url}/CD/{year}"
+            url = f"{self.api_base_url}/CNC/"
             logger.info(f"Querying API: {url}")
             
             response = requests.get(url)
@@ -45,11 +46,11 @@ class LACityPlanningScraper:
                         })
                         logger.info(f"Found PDF link: {entry['url']} from {entry['Date']}")
             
-            logger.info(f"Found {len(pdf_links)} PDF links for year {year}")
+            logger.info(f"Found {len(pdf_links)} PDF links")
             return pdf_links
             
         except Exception as e:
-            logger.error(f"Error in get_pdf_links for year {year}: {e}")
+            logger.error(f"Error in get_pdf_links: {e}")
             return []
     
     def download_pdf(self, url, date):
@@ -83,14 +84,14 @@ class LACityPlanningScraper:
             logger.info(f"Error downloading {url}: {e}")
             return None
     
-    def process_pdf_to_csv(self, pdf_path, date):
+    def process_pdf_to_csv(self, pdf_path, date, pdf_url):
         """Convert a PDF to CSV format."""
         try:
             csv_filename = f"biweekly_case_report_{date.replace('/', '_')}.csv"
             csv_path = self.csv_dir / csv_filename
             
             # Process the PDF and save as CSV
-            df = self.pdf_processor.process_pdf(pdf_path)
+            df = self.pdf_processor.process_pdf(pdf_path, pdf_url)
             if df is not None:
                 df.to_csv(csv_path, index=False)
                 logger.info(f"Successfully converted {pdf_path} to {csv_path}")
@@ -101,26 +102,79 @@ class LACityPlanningScraper:
             logger.error(f"Error processing PDF {pdf_path}: {e}")
             return None
     
-    def download_and_process_all_pdfs(self, start_year=2020):
-        """Download and process all PDFs from 2020 to current year."""
-        current_year = datetime.now().year
+    def download_and_process_all_pdfs(self, 
+                                    start_year: Optional[int] = None, 
+                                    end_year: Optional[int] = None,
+                                    start_month: Optional[int] = None,
+                                    end_month: Optional[int] = None):
+        """
+        Download and process available PDFs, optionally filtered by year and month ranges.
+        All ranges are inclusive (e.g., start_year=2023, end_year=2024 includes both 2023 and 2024).
+        
+        Args:
+            start_year: Optional start year to filter by (inclusive, e.g., 2023)
+            end_year: Optional end year to filter by (inclusive, e.g., 2024)
+            start_month: Optional start month to filter by (inclusive, 1-12)
+            end_month: Optional end month to filter by (inclusive, 1-12)
+        """
         all_csvs = []
         
-        for year in range(start_year, current_year + 1):
-            logger.info(f"Processing year {year}")
-            pdf_links = self.get_pdf_links(str(year))
-            
+        pdf_links = self.get_pdf_links()
+        
+        # Filter links by year and month ranges if specified
+        if any([start_year, end_year, start_month, end_month]):
+            filtered_links = []
             for pdf_info in pdf_links:
-                pdf_path = self.download_pdf(pdf_info['url'], pdf_info['date'])
-                if pdf_path:
-                    csv_path = self.process_pdf_to_csv(pdf_path, pdf_info['date'])
-                    if csv_path:
-                        all_csvs.append(csv_path)
+                try:
+                    date = datetime.strptime(pdf_info['date'], '%m/%d/%Y')
+                    
+                    # Check year range (inclusive)
+                    if start_year and date.year < start_year:
+                        continue
+                    if end_year and date.year > end_year:
+                        continue
+                        
+                    # Check month range (inclusive)
+                    if start_month and end_month:
+                        if not (start_month <= date.month <= end_month):  # Inclusive range check
+                            continue
+                    elif start_month and date.month < start_month:
+                        continue
+                    elif end_month and date.month > end_month:
+                        continue
+                        
+                    filtered_links.append(pdf_info)
+                except ValueError as e:
+                    logger.warning(f"Could not parse date {pdf_info['date']}: {e}")
+            pdf_links = filtered_links
+            logger.info(f"Filtered to {len(pdf_links)} PDFs matching year range {start_year}-{end_year} (inclusive), month range {start_month}-{end_month} (inclusive)")
+        
+        for pdf_info in pdf_links:
+            pdf_path = self.download_pdf(pdf_info['url'], pdf_info['date'])
+            if pdf_path:
+                csv_path = self.process_pdf_to_csv(pdf_path, pdf_info['date'], pdf_info['url'])
+                if csv_path:
+                    all_csvs.append(csv_path)
         
         # Combine all CSVs
         if all_csvs:
-            combined_df = pd.concat([pd.read_csv(csv) for csv in all_csvs])
-            combined_csv_path = self.csv_dir / "combined_biweekly_reports.csv"
+            # Read CSVs with string dtype for Council District
+            dfs = []
+            for csv in all_csvs:
+                df = pd.read_csv(csv, dtype={'Council District': str})
+                dfs.append(df)
+            
+            combined_df = pd.concat(dfs)
+            
+            # Add year and month ranges to filename if filtering
+            filename = "combined_biweekly_reports"
+            if start_year or end_year:
+                filename += f"_{start_year or ''}-{end_year or ''}"
+            if start_month or end_month:
+                filename += f"_{start_month or ''}-{end_month or ''}"
+            filename += ".csv"
+            
+            combined_csv_path = self.csv_dir / filename
             combined_df.to_csv(combined_csv_path, index=False)
             logger.info(f"Successfully combined all CSVs into {combined_csv_path}")
             return combined_csv_path

@@ -16,12 +16,12 @@ STANDARD_COLUMNS = [
     "Filing Date",
     "Case Number",
     "Address",
-    "CNC",
     "Community Plan Area",
     "Project Description",
     "Request Type",
     "Applicant Contact",
-    "Is ADU"
+    "Is ADU",
+    "PDF URL"
 ]
 
 
@@ -56,10 +56,12 @@ def map_column_name(header: str) -> str:
     # Map variations to standard names
     header_map = {
         "filing date": "Filing Date",
+        "application date": "Filing Date",
         "case number": "Case Number",
         "case": "Case Number",
         "address": "Address",
-        "cnc": "CNC",
+        "cd#": "Council District",
+        "council district": "Council District",
         "community plan area": "Community Plan Area",
         "community plan": "Community Plan Area",
         "project description": "Project Description",
@@ -83,17 +85,17 @@ def map_column_name(header: str) -> str:
     return None
 
 
-def extract_district_from_title(title: str) -> str:
+def extract_cnc_from_title(title: str) -> str:
     """
-    Extract district number from a title string.
+    Extract CNC name from a title string.
     
     Args:
-        title: Title string like "Council District -- 1"
+        title: Title string like "Certified Neighborhood Council -- Arroyo Seco"
         
     Returns:
-        District number as string
+        CNC name
     """
-    match = re.search(r'Council District\s*--\s*(\d+)', title)
+    match = re.search(r'Certified Neighborhood Council\s*--\s*(.+)', title)
     return match.group(1) if match else "Unknown"
 
 
@@ -150,14 +152,48 @@ def find_header_row(table: List[List[str]]) -> Tuple[int, Dict[int, str]]:
     return -1, {}
 
 
-def process_table(table: List[List[str]], district: str, column_mapping: Optional[Dict[int, str]] = None) -> Tuple[List[Dict[str, Any]], Dict[int, str]]:
+def clean_council_district(value: str) -> str:
+    """
+    Clean and validate a Council District value.
+    If the full value is invalid but numeric, tries using all characters after the first one.
+    
+    Args:
+        value: Raw Council District value
+        
+    Returns:
+        Cleaned Council District value or empty string if invalid
+    """
+    if not value:
+        return ""
+        
+    # Try the full value first
+    try:
+        district_num = int(value)
+        if 1 <= district_num <= 15:
+            return str(district_num)
+    except ValueError:
+        pass
+        
+    # If that fails and we have more than one character, try all but the first
+    if len(value) > 1:
+        try:
+            district_num = int(value[1:])
+            if 1 <= district_num <= 15:
+                return str(district_num)
+        except (ValueError, IndexError):
+            pass
+            
+    return ""
+
+
+def process_table(table: List[List[str]], column_mapping: Optional[Dict[int, str]] = None, pdf_url: Optional[str] = None) -> Tuple[List[Dict[str, Any]], Dict[int, str]]:
     """
     Process a single table, maintaining header information.
     
     Args:
         table: 2D list of table data
-        district: Council district number
         column_mapping: Optional existing column mapping
+        pdf_url: Optional URL of the source PDF
         
     Returns:
         Tuple of (list of processed rows, column mapping)
@@ -182,16 +218,20 @@ def process_table(table: List[List[str]], district: str, column_mapping: Optiona
         if not any(cell for cell in row) or is_header_row(row):
             continue
             
-        # Skip district header rows (e.g. "Council District -- 1,None,None,None,None,None,None,None")
-        if len(row) > 1 and "Council District" in str(row[0]) and all(str(cell).lower() == "none" for cell in row[1:]):
+        # Skip CNC header rows and summary rows
+        if len(row) > 0 and ("Certified Neighborhood Council" in str(row[0]) or "CNC Records:" in str(row[0])):
             continue
             
         row_data = {col: "" for col in STANDARD_COLUMNS}  # Initialize with empty values
-        row_data["Council District"] = district
+        row_data["PDF URL"] = pdf_url if pdf_url else ""
         
         for i, cell in enumerate(row):
             if i in column_mapping:
-                row_data[column_mapping[i]] = clean_text(str(cell))
+                value = clean_text(str(cell))
+                # Special handling for Council District
+                if column_mapping[i] == "Council District":
+                    value = clean_council_district(value)
+                row_data[column_mapping[i]] = value
         
         # Check if Project Description contains ADU
         project_desc = row_data.get("Project Description", "").lower()
@@ -206,20 +246,19 @@ def process_table(table: List[List[str]], district: str, column_mapping: Optiona
     return processed_rows, column_mapping
 
 
-def extract_tables_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+def extract_tables_from_pdf(pdf_path: str, pdf_url: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Extract all tables from a PDF file, adding district information.
+    Extract all tables from a PDF file.
     
     Args:
         pdf_path: Path to the PDF file
+        pdf_url: Optional URL of the source PDF
         
     Returns:
         List of dictionaries containing the extracted data
     """
     all_data = []
-    current_district = None
     current_column_mapping = None
-    current_table = []  # Keep track of the current table across pages
     
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, 1):
@@ -248,51 +287,14 @@ def extract_tables_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
                     continue
                 
                 print(f"\nProcessing table {table_idx} on page {page_num}")
-                print(f"Table has {len(table)} rows")
                 
-                # Print the entire table for debugging
-                print("\nTable contents:")
-                for i, row in enumerate(table):
-                    print(f"Row {i}: {[str(cell) for cell in row]}")
+                # Process the table
+                rows, column_mapping = process_table(table, current_column_mapping, pdf_url)
+                all_data.extend(rows)
                 
-                # Check if this is a new district table
-                first_cell = str(table[0][0]) if table[0] and table[0][0] else ""
-                if "Council District" in first_cell:
-                    # Process any remaining rows from the previous table
-                    if current_table and current_district and current_column_mapping:
-                        rows, _ = process_table(current_table, current_district, current_column_mapping)
-                        all_data.extend(rows)
-                        current_table = []
-                    
-                    current_district = extract_district_from_title(first_cell)
-                    current_column_mapping = None  # Reset column mapping for new district
-                    print(f"Found new district: {current_district}")
-                
-                if current_district:
-                    # If we have a column mapping, this might be a continuation of the previous table
-                    if current_column_mapping:
-                        # Check if this looks like a continuation (no headers, similar structure)
-                        if not any(is_header_row(row) for row in table):
-                            print("Detected table continuation")
-                            current_table.extend(table)
-                            continue
-                    
-                    # Process the table, maintaining column mapping across pages
-                    rows, new_mapping = process_table(table, current_district, current_column_mapping)
-                    if new_mapping:  # Update mapping if we found new headers
-                        current_column_mapping = new_mapping
-                        print(f"Found new column mapping: {new_mapping}")
-                        current_table = table  # Start a new table
-                    else:
-                        current_table.extend(table)  # Add to current table
-                    
-                    print(f"Processed {len(rows)} rows for district {current_district}")
-                    all_data.extend(rows)
-    
-    # Process any remaining rows from the last table
-    if current_table and current_district and current_column_mapping:
-        rows, _ = process_table(current_table, current_district, current_column_mapping)
-        all_data.extend(rows)
+                # Update current column mapping
+                if rows:
+                    current_column_mapping = column_mapping
     
     return all_data
 
@@ -347,31 +349,29 @@ def process_pdf_directory(input_dir: str, output_dir: str) -> None:
 
 class PDFProcessor:
     def __init__(self):
-        self.standard_columns = STANDARD_COLUMNS
-    
-    def process_pdf(self, pdf_path: str) -> pd.DataFrame:
+        pass
+        
+    def process_pdf(self, pdf_path: str, pdf_url: Optional[str] = None) -> pd.DataFrame:
         """
-        Process a PDF file and return the data as a pandas DataFrame.
+        Process a PDF file and return the extracted data as a DataFrame.
         
         Args:
             pdf_path: Path to the PDF file
+            pdf_url: Optional URL of the source PDF
             
         Returns:
             DataFrame containing the extracted data
         """
-        data = extract_tables_from_pdf(pdf_path)
-        if not data:
+        try:
+            # Extract tables from PDF
+            data = extract_tables_from_pdf(pdf_path, pdf_url)
+            
+            # Convert to DataFrame
+            if data:
+                df = pd.DataFrame(data)
+                return df
             return None
             
-        # Convert to DataFrame
-        df = pd.DataFrame(data)
-        
-        # Ensure all standard columns exist
-        for col in self.standard_columns:
-            if col not in df.columns:
-                df[col] = ""
-                
-        # Reorder columns to match standard order
-        df = df[self.standard_columns]
-        
-        return df 
+        except Exception as e:
+            print(f"Error processing PDF {pdf_path}: {e}")
+            return None 
